@@ -500,7 +500,7 @@ class LoadImagesAndLabels(Dataset):
         self.img_files = list(cache.keys())  # update
         self.label_files = img2label_paths(cache.keys())  # update
         n = len(shapes)  # number of images
-        bi = np.floor(np.arange(n) / batch_size).astype(np.int)  # batch index
+        bi = np.floor(np.arange(n) / batch_size).astype(np.int32)  # batch index
         nb = bi[-1] + 1  # number of batches
         self.batch = bi  # batch index of image
         self.n = n
@@ -551,7 +551,7 @@ class LoadImagesAndLabels(Dataset):
                 elif mini > 1:
                     shapes[i] = [1, 1 / mini]
 
-            self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(np.int) * stride
+            self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(np.int32) * stride
 
         # Cache images into memory for faster training (WARNING: large datasets may exceed system RAM)
         self.imgs, self.img_npy = [None] * n, [None] * n
@@ -779,16 +779,24 @@ class LoadSegImagesAndLabels(Dataset):
         self.label_files = segimg2label_paths(self.img_files)  # labels
         # if prefix == colorstr('train: '):
         labelcounter = []
-        for img in self.label_files:
+        counter = 0
+        #print( self.label_files)
+        #exit()
+        for img in tqdm(self.label_files):
+            img = img.split('.')[0] + '_lane_line_label_id.png'
+            #print(img)
             image = cv2.imread(img, cv2.IMREAD_GRAYSCALE)
+            image = cv2.resize(image, (288,512))
             num = image.flatten().tolist()
             labelcounter.extend(num)
+            counter+=1
+            #print(counter)
 
         labelcounter = Counter(labelcounter)
         labelcounter = dict(labelcounter)
         segcls = sorted(list(labelcounter.keys()))
         seg_weights = [labelcounter[i] for i in segcls]
-        seg_weights_balance = [math.pow(i, 1 / 5) for i in seg_weights]
+        seg_weights_balance = [math.pow(i, 1 / 4) for i in seg_weights]
         self.seg_weights = [max(seg_weights_balance) / i for i in seg_weights_balance]
         # update label map
         for i, cls in enumerate(segcls):
@@ -935,6 +943,8 @@ def load_segimagelabel(self, i):
     # loads 1 image from dataset index 'i', returns im, original hw, resized hw
     path = self.img_files[i]
     lpath = self.label_files[i]
+    lpath = lpath.split('.')[0] + '_lane_line_label_id.png'
+    #print("lpath", lpath)
     im = cv2.imread(path)  # BGR
     label = cv2.imread(lpath, cv2.IMREAD_GRAYSCALE)  # BGR
     assert im is not None, f'Image Not Found {path}'
@@ -1168,7 +1178,7 @@ def extract_boxes(path='../datasets/coco128'):  # from utils.datasets import *; 
                     b = x[1:] * [w, h, w, h]  # box
                     # b[2:] = b[2:].max()  # rectangle to square
                     b[2:] = b[2:] * 1.2 + 3  # pad
-                    b = xywh2xyxy(b.reshape(-1, 4)).ravel().astype(np.int)
+                    b = xywh2xyxy(b.reshape(-1, 4)).ravel().astype(np.int32)
 
                     b[[0, 2]] = np.clip(b[[0, 2]], 0, w)  # clip boxes outside of image
                     b[[1, 3]] = np.clip(b[[1, 3]], 0, h)

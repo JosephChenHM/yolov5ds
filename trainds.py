@@ -109,6 +109,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
     nc = 1 if single_cls else int(data_dict['nc'])  # number of classes
     segnc = int(data_dict['segnc'])
+    #segnc = int(data_dict['segnc']) + 1
     names = ['item'] if single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
     assert len(names) == nc, f'{len(names)} names found for nc={nc} dataset in {data}'  # check
     is_coco = isinstance(val_path, str) and val_path.endswith('coco/val2017.txt')  # COCO dataset
@@ -236,7 +237,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                                                                        quad=opt.quad,
                                                                        prefix=colorstr('train: '), shuffle=True)
 
-    # print("cls balance :",cls_balance)
+    #print("cls balance :",cls_balance)
     mlc = int(np.concatenate(dataset.labels, 0)[:, 0].max())  # max label class
     nb = len(train_loader)  # number of batches
     snb = len(roadseg_train_loader)
@@ -367,7 +368,9 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             # Forward
             with amp.autocast(enabled=cuda):
                 seg_pred = model(segimgs)  # forward
+                #print("seg_pred",seg_pred[1].shape, "target", segtargets.long().to(device).shape)
                 segloss = SegLoss(seg_pred[1], segtargets.long().to(device))  # loss scaled by batch_size
+                #segloss *= 2
                 if RANK != -1:
                     segloss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                 if opt.quad:

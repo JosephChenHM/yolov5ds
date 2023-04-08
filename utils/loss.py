@@ -165,11 +165,11 @@ class ComputeLoss:
                     # self.loss_perlayer[i] += torch.mean(self.BCEcls(ps[:, 5:], t))
 
                     # # print(ps[:, 5:].shape, t.shape, self.BCEcls(ps[:, 5:], t).shape)
-                    # # print("cls_balance:",self.cls_balance)
+                    #print("cls_balance:",self.cls_balance)
                     # # gamma = random.randint(5,20)
                     # gamma2 = random.randint(3, 10)
                     # 
-                    count_balance = [math.pow(it, 1 / 5) for it in self.cls_balance]
+                    count_balance = [math.pow(it, 1 / 4) for it in self.cls_balance]
                     # count_balance2 = [math.pow(it, 1 / gamma2) for it in self.cls_balance]
                     # max_num = max(count_balance)
                     cls_weights = [max(count_balance)/it for it in count_balance]
@@ -177,14 +177,15 @@ class ComputeLoss:
                     # cls_weights2 = [max_num2 / it for it in count_balance2]
 
                     # anchor_t = tcls[i].detach().cpu().numpy
-                    # anchor_w = [cls_weights[tcls[i][s]] for s in range(n)]
-                    # print("anchor_w:",anchor_w)
-                    # print("cls weights:",cls_weights)
-                    # print("self.BCEcls(ps[:, 5:], t):",self.BCEcls(ps[:, 5:], t).shape,self.BCEcls(ps[:, 5:], t))
+                    anchor_w = [cls_weights[tcls[i][s]] for s in range(n)]
+                    #print("anchor_w:",anchor_w)
+                    
+                    #print("cls weights:",cls_weights)
+                    #print("self.BCEcls(ps[:, 5:], t):",self.BCEcls(ps[:, 5:], t).shape,self.BCEcls(ps[:, 5:], t))
                     # anchor_w = torch.Tensor(anchor_w).cuda().reshape(n,-1)
-                    # print("anchor_w:",anchor_w.shape)
+                    #print("anchor_w:",anchor_w.shape)
                     lcls += torch.mean(self.BCEcls(ps[:, 5:], t)*torch.Tensor(cls_weights).cuda()) # BCE
-                    # print(anchor_w.shape,torch.Tensor(cls_weights2).cuda().shape)
+                    #print(anchor_w.shape,torch.Tensor(cls_weights2).cuda().shape)
                     # lcls += self.BCEcls(ps[:, 5:], t) #* torch.Tensor(cls_weights2).cuda() )  # BCE
 
                 # Append targets to text file
@@ -220,7 +221,8 @@ class ComputeLoss:
                             ], device=targets.device).float() * g  # offsets
 
         for i in range(self.nl):
-            anchors = self.anchors[i]
+            anchors, shape = self.anchors[i], p[i].shape
+            #anchors = self.anchors[i]
             gain[2:6] = torch.tensor(p[i].shape)[[3, 2, 3, 2]]  # xyxy gain
 
             # Match targets to anchors
@@ -253,7 +255,8 @@ class ComputeLoss:
 
             # Append
             a = t[:, 6].long()  # anchor indices
-            indices.append((b, a, gj.clamp_(0, gain[3] - 1), gi.clamp_(0, gain[2] - 1)))  # image, anchor, grid indices
+            indices.append((b, a, gj.clamp_(0, shape[2] - 1), gi.clamp_(0, shape[3] - 1)))  # image, anchor, grid
+            #iindices.append((b, a, gj.clamp_(0, gain[3] - 1), gi.clamp_(0, gain[2] - 1)))  # image, anchor, grid indices
             tbox.append(torch.cat((gxy - gij, gwh), 1))  # box
             anch.append(anchors[a])  # anchors
             tcls.append(c)  # class
