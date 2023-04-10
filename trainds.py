@@ -297,8 +297,12 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     scaler = amp.GradScaler(enabled=cuda)
     stopper = EarlyStopping(patience=opt.patience)
     seg_weights = roadseg_dataset.seg_weights
+    ## no detect class weight
+    cls_balance = [1.0, 1.0, 1.0, 1.0]
     compute_loss = ComputeLoss(model, cls_balance)  # init loss class
-    SegLoss = nn.CrossEntropyLoss(weight=torch.tensor(seg_weights, device=device), ignore_index=255)
+    ## no segment class weight
+    #SegLoss = nn.CrossEntropyLoss(weight=torch.tensor(seg_weights, device=device), ignore_index=255)
+    SegLoss = nn.CrossEntropyLoss(ignore_index=255)
     LOGGER.info(f'Image sizes {imgsz} train, {imgsz} val\n'
                 f'Using {train_loader.num_workers * WORLD_SIZE} dataloader workers\n'
                 f"Logging results to {colorstr('bold', save_dir)}\n"
