@@ -220,7 +220,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     # Trainloader
     train_loader, dataset, cls_balance = create_dataloader(train_path, nc, imgsz, batch_size // WORLD_SIZE, gs,
                                                            single_cls,
-                                                           hyp=hyp, augment=True, cache=opt.cache, rect=opt.rect,
+                                                           hyp=hyp, augment=False, cache=opt.cache, rect=opt.rect,
                                                            rank=LOCAL_RANK,
                                                            workers=workers, image_weights=opt.image_weights,
                                                            quad=opt.quad,
@@ -230,7 +230,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     roadseg_train_loader, roadseg_dataset = create_road_seg_dataloader(roadseg_train_path, segnc, imgsz,
                                                                        batch_size // WORLD_SIZE, gs,
                                                                        single_cls,
-                                                                       hyp=hyp, augment=True, cache=opt.cache,
+                                                                       hyp=hyp, augment=False, cache=opt.cache,
                                                                        rect=opt.rect,
                                                                        rank=LOCAL_RANK,
                                                                        workers=workers, image_weights=opt.image_weights,
