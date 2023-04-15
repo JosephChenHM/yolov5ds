@@ -786,7 +786,7 @@ class LoadSegImagesAndLabels(Dataset):
             img = img.split('.')[0] + '_lane_line_label_id.png'
             #print(img)
             image = cv2.imread(img, cv2.IMREAD_GRAYSCALE)
-            image = cv2.resize(image, (288,512))
+            image = cv2.resize(image, (540,960))
             num = image.flatten().tolist()
             labelcounter.extend(num)
             counter+=1
