@@ -29,7 +29,7 @@ from tensorflow import keras
 
 from models.common import C3, SPP, SPPF, Bottleneck, BottleneckCSP, Concat, Conv, DWConv, Focus, autopad
 from models.experimental import CrossConv, MixConv2d, attempt_load
-from models.yolo import Detect
+from models.yolodhs import Detect
 from utils.activations import SiLU
 from utils.general import LOGGER, make_divisible, print_args
 
@@ -82,6 +82,8 @@ class TFConv(keras.layers.Layer):
             self.act = (lambda x: x * tf.nn.relu6(x + 3) * 0.166666667) if act else tf.identity
         elif isinstance(w.act, (nn.SiLU, SiLU)):
             self.act = (lambda x: keras.activations.swish(x)) if act else tf.identity
+        elif isinstance(w.act, (nn.ReLU6)):
+            self.act = (lambda x: tf.nn.relu6(x)) if act else tf.identity
         else:
             raise Exception(f'no matching TensorFlow activation found for {w.act}')
 
@@ -195,6 +197,34 @@ class TFSPPF(keras.layers.Layer):
         y2 = self.m(y1)
         return self.cv2(tf.concat([x, y1, y2, self.m(y2)], 3))
 
+class TFDecoupledHead(keras.layers.Layer):
+    def __init__(self, ch=256, nc=80, width=1.0, anchors=(), w=None):
+        super().__init__()
+        LOGGER.info(f"--------------TFDecoupledHead nc:{nc} nl:{len(anchors)} na:{len(anchors[0])}------------------")
+        self.nc = nc  # number of classes
+        self.nl = len(anchors)  # number of detection layers
+        self.na = len(anchors[0]) // 2  # number of anchors
+        self.merge = TFConv(ch, 256 * width, 1, 1, w=w.merge)
+        self.cls_convs1 = TFConv(256 * width, 256 * width, 3, 1, 1, w=w.cls_convs1)
+        self.cls_convs2 = TFConv(256 * width, 256 * width, 3, 1, 1, w=w.cls_convs2)
+        self.reg_convs1 = TFConv(256 * width, 256 * width, 3, 1, 1, w=w.reg_convs1)
+        self.reg_convs2 = TFConv(256 * width, 256 * width, 3, 1, 1, w=w.reg_convs2)
+        #TFConv2d(c1, c_, 1, 1, bias=False, w=w.cv2)
+        self.cls_preds = TFConv2d(256 * width, self.nc * self.na, 1, w=w.cls_preds)
+        self.reg_preds = TFConv2d(256 * width, 4 * self.na, 1, w=w.reg_preds)
+        self.obj_preds = TFConv2d(256 * width, 1 * self.na, 1, w=w.obj_preds)
+
+    def call(self, inputs):
+        x = self.merge(inputs)
+        x1 = self.cls_convs1(x)
+        x1 = self.cls_convs2(x1)
+        x1 = self.cls_preds(x1)
+        x2 = self.reg_convs1(x)
+        x2 = self.reg_convs2(x2)
+        x21 = self.reg_preds(x2)
+        x22 = self.obj_preds(x2)
+        out = tf.concat([x21, x22, x1], 3) #3
+        return out
 
 class TFDetect(keras.layers.Layer):
     def __init__(self, nc=80, anchors=(), ch=(), imgsz=(640, 640), w=None):  # detection layer
@@ -208,7 +238,8 @@ class TFDetect(keras.layers.Layer):
         self.anchors = tf.convert_to_tensor(w.anchors.numpy(), dtype=tf.float32)
         self.anchor_grid = tf.reshape(self.anchors * tf.reshape(self.stride, [self.nl, 1, 1]),
                                       [self.nl, 1, -1, 1, 2])
-        self.m = [TFConv2d(x, self.no * self.na, 1, w=w.m[i]) for i, x in enumerate(ch)]
+        # self.m = [TFConv2d(x, self.no * self.na, 1, w=w.m[i]) for i, x in enumerate(ch)]
+        self.m = [TFDecoupledHead(x, self.nc, 1, anchors, w=w.m[i]) for i, x in enumerate(ch)]
         self.training = False  # set to False after building model
         self.imgsz = imgsz
         for i in range(self.nl):
@@ -222,7 +253,8 @@ class TFDetect(keras.layers.Layer):
             x.append(self.m[i](inputs[i]))
             # x(bs,20,20,255) to x(bs,3,20,20,85)
             ny, nx = self.imgsz[0] // self.stride[i], self.imgsz[1] // self.stride[i]
-            x[i] = tf.transpose(tf.reshape(x[i], [-1, ny * nx, self.na, self.no]), [0, 2, 1, 3])
+            self.training=True
+            #x[i] = tf.transpose(tf.reshape(x[i], [-1, ny * nx, self.na, self.no]), [0, 2, 1, 3])
 
             if not self.training:  # inference
                 y = tf.sigmoid(x[i])
@@ -234,7 +266,7 @@ class TFDetect(keras.layers.Layer):
                 y = tf.concat([xy, wh, y[..., 4:]], -1)
                 z.append(tf.reshape(y, [-1, self.na * ny * nx, self.no]))
 
-        return x if self.training else (tf.concat(z, 1), x)
+        return x if self.training else x#(tf.concat(z, 1), x)
 
     @staticmethod
     def _make_grid(nx=20, ny=20):
@@ -268,14 +300,14 @@ class TFConcat(keras.layers.Layer):
         return tf.concat(inputs, self.d)
 
 
-def parse_model(d, ch, model, imgsz):  # model_dict, input_channels(3)
+def parse_model(d, sd, ch, model, imgsz):  # model_dict, input_channels(3)
     LOGGER.info(f"\n{'':>3}{'from':>18}{'n':>3}{'params':>10}  {'module':<40}{'arguments':<30}")
     anchors, nc, gd, gw = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple']
     na = (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors  # number of anchors
     no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
 
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
-    for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
+    for i, (f, n, m, args) in enumerate(d['backbone'] + d['head'] + sd['SegHead']):  # from, number, module, args
         m_str = m
         m = eval(m) if isinstance(m, str) else m  # eval strings
         for j, a in enumerate(args):
@@ -285,7 +317,7 @@ def parse_model(d, ch, model, imgsz):  # model_dict, input_channels(3)
                 pass
 
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
-        if m in [nn.Conv2d, Conv, Bottleneck, SPP, SPPF, DWConv, MixConv2d, Focus, CrossConv, BottleneckCSP, C3]:
+        if m in [Conv, Bottleneck, SPP, SPPF, DWConv, MixConv2d, Focus, CrossConv, BottleneckCSP, C3]:
             c1, c2 = ch[f], args[0]
             c2 = make_divisible(c2 * gw, 8) if c2 != no else c2
 
@@ -302,6 +334,11 @@ def parse_model(d, ch, model, imgsz):  # model_dict, input_channels(3)
             if isinstance(args[1], int):  # number of anchors
                 args[1] = [list(range(args[1] * 2))] * len(f)
             args.append(imgsz)
+        elif m is nn.Conv2d:
+            args[0] = int(args[0]*gw)
+            args[1] = int(sd['segnc'])
+            #print("segnc:", sd['segnc'])
+            c2 = ch[f]
         else:
             c2 = ch[f]
 
@@ -321,33 +358,42 @@ def parse_model(d, ch, model, imgsz):  # model_dict, input_channels(3)
 
 
 class TFModel:
-    def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None, model=None, imgsz=(640, 640)):  # model, channels, classes
+    def __init__(self, cfg='yolov5s.yaml', seg_cfg="models/segheads.yaml", ch=3, nc=None, segnc=None, model=None, imgsz=(640, 640)):  # model, channels, classes
         super().__init__()
+        import yaml
         if isinstance(cfg, dict):
             self.yaml = cfg  # model dict
+            self.yaml_file = Path(seg_cfg).name
+            with open(seg_cfg, encoding='ascii', errors='ignore') as f:
+                self.seg_yaml = yaml.safe_load(f)  # model dict
         else:  # is *.yaml
-            import yaml  # for torch hub
+            #import yaml  # for torch hub
             self.yaml_file = Path(cfg).name
             with open(cfg) as f:
                 self.yaml = yaml.load(f, Loader=yaml.FullLoader)  # model dict
+            with open(seg_cfg, encoding='ascii', errors='ignore') as f2:
+                self.seg_yaml = yaml.safe_load(f2)  # model dict
 
         # Define model
         if nc and nc != self.yaml['nc']:
             LOGGER.info(f"Overriding {cfg} nc={self.yaml['nc']} with nc={nc}")
             self.yaml['nc'] = nc  # override yaml value
-        self.model, self.savelist = parse_model(deepcopy(self.yaml), ch=[ch], model=model, imgsz=imgsz)
+        self.model, self.savelist = parse_model(deepcopy(self.yaml), deepcopy(self.seg_yaml), ch=[ch], model=model, imgsz=imgsz)
 
     def predict(self, inputs, tf_nms=False, agnostic_nms=False, topk_per_class=100, topk_all=100, iou_thres=0.45,
                 conf_thres=0.25):
         y = []  # outputs
+        y2 = []
         x = inputs
+        custom_savelist = [24,33]
         for i, m in enumerate(self.model.layers):
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
 
             x = m(x)  # run
             y.append(x if m.i in self.savelist else None)  # save output
-
+            if m.i in custom_savelist:
+                y2.append(x)
         # Add TensorFlow NMS
         if tf_nms:
             boxes = self._xywh2xyxy(x[0][..., :4])
@@ -363,7 +409,7 @@ class TFModel:
                     boxes, scores, topk_per_class, topk_all, iou_thres, conf_thres, clip_boxes=False)
                 return nms, x[1]
 
-        return x[0]  # output only first tensor [1,6300,85] = [xywh, conf, class0, class1, ...]
+        return y2 #x[0]  # output only first tensor [1,6300,85] = [xywh, conf, class0, class1, ...]
         # x = x[0][0]  # [x(1,6300,85), ...] to x(6300,85)
         # xywh = x[..., :4]  # x(6300,4) boxes
         # conf = x[..., 4:5]  # x(6300,1) confidences

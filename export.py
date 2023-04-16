@@ -205,14 +205,14 @@ def export_tflite(keras_model, im, file, int8, data, ncalib, prefix=colorstr('Te
 
         LOGGER.info(f'\n{prefix} starting export with tensorflow {tf.__version__}...')
         batch_size, ch, *imgsz = list(im.shape)  # BCHW
-        f = str(file).replace('.pt', '-fp16.tflite')
+        f = str(file).replace('.pt', '-fp32.tflite')
 
         converter = tf.lite.TFLiteConverter.from_keras_model(keras_model)
         converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
-        converter.target_spec.supported_types = [tf.float16]
+        # converter.target_spec.supported_types = [tf.float16]
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         if int8:
-            dataset = LoadImages(check_dataset(data)['train'], img_size=imgsz, auto=False)  # representative data
+            dataset = LoadImages(check_dataset(data)['train'] + '/images', img_size=imgsz, auto=False)  # representative data
             converter.representative_dataset = lambda: representative_dataset_gen(dataset, ncalib)
             converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
             converter.target_spec.supported_types = []
