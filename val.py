@@ -1,4 +1,4 @@
-# YOLOv5 🚀 by Ultralytics, GPL-3.0 license
+# YOLOv5 ?? by Ultralytics, GPL-3.0 license
 """
 Validate a trained YOLOv5 model accuracy on a custom dataset
 
@@ -25,14 +25,14 @@ ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 from models.common import DetectMultiBackend
 from utils.callbacks import Callbacks
-from utils.datasets import create_dataloader
+from utils.datasets import create_dataloader, create_road_seg_dataloader
 from utils.general import (LOGGER, box_iou, check_dataset, check_img_size, check_requirements, check_yaml,
                            coco80_to_coco91_class, colorstr, increment_path, non_max_suppression, print_args,
                            scale_coords, xywh2xyxy, xyxy2xywh)
 from utils.metrics import ConfusionMatrix, ap_per_class
 from utils.plots import output_to_target, plot_images, plot_val_study
-from utils.torch_utils import select_device, time_sync
-
+from utils.torch_utils import select_device, time_sync, torch_distributed_zero_first
+import segval
 
 def save_one_txt(predn, save_conf, shape, file):
     # Save one txt result
@@ -78,6 +78,88 @@ def process_batch(detections, labels, iouv):
         matches = torch.Tensor(matches).to(iouv.device)
         correct[matches[:, 1].long()] = matches[:, 2:3] >= iouv
     return correct
+
+def seg_run(data,
+        weights=None,  # model.pt path(s)
+        batch_size=32,  # batch size
+        imgsz=640,  # inference size (pixels)
+        conf_thres=0.001,  # confidence threshold
+        iou_thres=0.6,  # NMS IoU threshold
+        task='val',  # train, val, test, speed or study
+        device='',  # cuda device, i.e. 0 or 0,1,2,3 or cpu
+        single_cls=False,  # treat as single-class dataset
+        augment=False,  # augmented inference
+        verbose=False,  # verbose output
+        save_txt=False,  # save results to *.txt
+        save_hybrid=False,  # save label+prediction hybrid results to *.txt
+        save_conf=False,  # save confidences in --save-txt labels
+        save_json=False,  # save a COCO-JSON results file
+        project=ROOT / 'runs/val',  # save to project/name
+        name='exp',  # save to project/name
+        exist_ok=False,  # existing project/name ok, do not increment
+        half=True,  # use FP16 half-precision inference
+        dnn=False,  # use OpenCV DNN for ONNX inference
+        model=None,
+        dataloader=None,
+        save_dir=Path(''),
+        plots=True,
+        callbacks=Callbacks(),
+        compute_loss=None,
+        ):
+    # Initialize/load model and set device
+    training = model is not None
+    if training:  # called by train.py
+        device, pt, engine = next(model.parameters()).device, True, False  # get model device, PyTorch model
+
+        half &= device.type != 'cpu'  # half precision only supported on CUDA
+        model.half() if half else model.float()
+    else:  # called directly
+        device = select_device(device, batch_size=batch_size)
+
+        # Directories
+        save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
+        (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+
+        # Load model
+        ckpts = torch.load(weights[0])
+        model = ckpts['model']
+        stride, names = model.stride[-1].item(), model.names
+
+        #stride, pt, engine = model.stride, model.pt, model.engine
+        imgsz = check_img_size(imgsz, s=stride)  # check image size
+        pt = True
+        model.cuda(device)
+        half &= (pt or engine) and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+        if pt:
+            model.model.half() if half else model.model.float()
+        elif engine:
+            batch_size = model.batch_size
+        else:
+            half = False
+            batch_size = 1  # export.py models default to batch-size 1
+            #device = torch.device('cpu')
+            LOGGER.info(f'Forcing --batch-size 1 square inference shape(1,3,{imgsz},{imgsz}) for non-PyTorch backends')
+
+        # Data
+        data = check_dataset(data)  # check
+
+    # Configure
+    #model.eval()
+    is_coco = isinstance(data.get('val'), str) and data['val'].endswith('coco/val2017.txt')  # COCO dataset
+    nc = 1 if single_cls else int(data['nc'])  # number of classes
+    segnc = int(data['segnc'])
+    iouv = torch.linspace(0.5, 0.95, 10).to(device)  # iou vector for mAP@0.5:0.95
+    niou = iouv.numel()
+
+    # Dataloader
+    if not training:
+        pad = 0.0 if task == 'speed' else 0.5
+        task = task if task in ('train', 'val', 'test') else 'val'  # path to train/val/test images
+        task = 'road_seg_val' if task == 'val' else task
+        roadseg_val_dataloader = create_road_seg_dataloader(data[task], segnc, imgsz, batch_size, stride, single_cls, pad=pad, rect=pt,
+                                       prefix=colorstr(f'{task}: '))[0]
+    SegLoss = torch.nn.CrossEntropyLoss(ignore_index=255)
+    ave_loss, mean_IoU, IoU_array = segval.validate(roadseg_val_dataloader, model, segnc, SegLoss)
 
 
 @torch.no_grad()
@@ -152,7 +234,8 @@ def run(data,
         model.warmup(imgsz=(1, 3, imgsz, imgsz), half=half)  # warmup
         pad = 0.0 if task == 'speed' else 0.5
         task = task if task in ('train', 'val', 'test') else 'val'  # path to train/val/test images
-        dataloader = create_dataloader(data[task], imgsz, batch_size, stride, single_cls, pad=pad, rect=pt,
+        print("data[task]", data[task])
+        dataloader = create_dataloader(data[task], nc, imgsz, batch_size, stride, single_cls, pad=pad, rect=pt,
                                        prefix=colorstr(f'{task}: '))[0]
 
     seen = 0
@@ -176,7 +259,7 @@ def run(data,
         dt[0] += t2 - t1
 
         # Inference
-        # print("val:",training, augment, im.shape)
+        #print("val:",training, augment, im.shape)
         (out, train_out), roadsegout = model(im) if training else model(im, augment=augment, val=True)  # inference, loss outputs
         dt[1] += time_sync() - t2
 
@@ -339,7 +422,8 @@ def main(opt):
     if opt.task in ('train', 'val', 'test'):  # run normally
         if opt.conf_thres > 0.001:  # https://github.com/ultralytics/yolov5/issues/1466
             LOGGER.info(f'WARNING: confidence threshold {opt.conf_thres} >> 0.001 will produce invalid mAP values.')
-        run(**vars(opt))
+        #run(**vars(opt))
+        seg_run(**vars(opt))
 
     else:
         weights = opt.weights if isinstance(opt.weights, list) else [opt.weights]
